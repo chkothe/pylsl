@@ -181,7 +181,7 @@ class StreamInfo:
 
         """
         if handle is not None:
-            self.obj = handle
+            self.obj = c_void_p(handle)
         else:
             if isinstance(channel_format, str):
                 channel_format = string2fmt[channel_format]
@@ -191,6 +191,7 @@ class StreamInfo:
                                                  c_double(nominal_srate),
                                                  channel_format,
                                                  c_char_p(str.encode(source_id)))
+            self.obj = c_void_p(self.obj)
             if not self.obj:
                 raise RuntimeError("could not create stream description "
                                    "object.")
@@ -386,6 +387,7 @@ class StreamOutlet:
 
         """
         self.obj = lib.lsl_create_outlet(info.obj, chunk_size, max_buffered)
+        self.obj = c_void_p(self.obj)
         if not self.obj:
             raise RuntimeError("could not create stream outlet.")
         self.channel_format = info.channel_format()
@@ -627,6 +629,7 @@ class StreamInlet:
                             "got a list.")
         self.obj = lib.lsl_create_inlet(info.obj, max_buflen, max_chunklen,
                                         recover)
+        self.obj = c_void_p(self.obj)
         if not self.obj: 
             raise RuntimeError("could not create stream inlet.")
         self.channel_format = info.channel_format()
@@ -1021,6 +1024,7 @@ class ContinuousResolver:
                              "specified, too, and vice versa.")
         else:
             self.obj = lib.lsl_create_continuous_resolver(c_double(forget_after))
+        self.obj = c_void_p(self.obj)
         if not self.obj:
             raise RuntimeError("could not create continuous resolver.")
         
