@@ -76,6 +76,28 @@ cf_int64 = 7
 # Can not be transmitted.
 cf_undefined = 0
 
+# Post-processing options for stream inlets.
+
+# No automatic post-processing; return the ground-truth time stamps for manual
+# post-processing (this is the default behavior of the inlet).
+post_none = 0
+# Perform automatic clock synchronization; equivalent to manually adding the
+# time_correction() value to the received time stamps.
+post_clocksync = 1
+# Remove jitter from time stamps. This will apply a smoothing algorithm to the
+# received time stamps; the smoothing needs to see a minimum number of samples
+# (30-120 seconds worst-case) until the remaining jitter is consistently below
+# 1ms.
+post_dejitter = 2
+# Force the time-stamps to be monotonically ascending (only makes sense if
+# timestamps are dejittered).
+post_monotonize = 4
+# Post-processing is thread-safe (same inlet can be read from by multiple
+# threads); uses somewhat more CPU.
+post_threadsafe = 8
+# The combination of all possible post-processing options.
+post_ALL = 1 | 2 | 4 | 8
+
 
 # ==========================================================
 # === Free Functions provided by the lab streaming layer ===
@@ -310,7 +332,7 @@ class StreamInfo:
         concurrent recording activitites on the same sub-network (e.g., in 
         multiple experiment areas) from seeing each other's streams 
         (can be assigned in a configuration file read by liblsl, see also 
-        documentation on configuration files).
+        Network Connectivity in the LSL wiki).
 
         """
         return lib.lsl_get_session_id(self.obj).decode('utf-8')
@@ -325,10 +347,11 @@ class StreamInfo:
         """Extended description of the stream.
 
         It is highly recommended that at least the channel labels are described 
-        here. See code examples in the documentation. Other information, such 
+        here. See code examples on the LSL wiki. Other information, such 
         as amplifier settings, measurement units if deviating from defaults, 
         setup information, subject information, etc., can be specified here, as 
-        well. See Meta-Data Recommendations in the docs.
+        well. Meta-data recommendations follow the XDF file format project
+        (github.com/sccn/xdf/wiki/Meta-Data or web search for: XDF meta-data).
         
         Important: if you use a stream content type for which meta-data 
         recommendations exist, please try to lay out your meta-data in 
@@ -395,7 +418,7 @@ class StreamOutlet:
         self.do_push_sample = fmt2push_sample[self.channel_format]
         self.do_push_chunk = fmt2push_chunk[self.channel_format]
         self.value_type = fmt2type[self.channel_format]
-        self.sample_type = self.value_type*self.channel_count
+        self.sample_type = self.value_type * self.channel_count
                 
     def __del__(self):
         """Destroy an outlet.
@@ -459,7 +482,7 @@ class StreamOutlet:
             if self.channel_format == cf_string:
                 x = [v.encode('utf-8') for v in x]
             if len(x) % self.channel_count == 0:
-                constructor = self.value_type*len(x)
+                constructor = self.value_type * len(x)
                 # noinspection PyCallingNonCallable
                 handle_error(self.do_push_chunk(self.obj, constructor(*x),
                                                 c_long(len(x)),
@@ -499,7 +522,7 @@ def resolve_streams(wait_time=1.0):
     router, but may also include a group of machines visible to each other via 
     multicast packets (given that the network supports it), or list of 
     hostnames. These details may optionally be customized by the experimenter 
-    in a configuration file (see configuration file in the documentation).  
+    in a configuration file (see Network Connectivity in the LSL wiki).  
     
     Keyword arguments:
     wait_time -- The waiting time for the operation, in seconds, to search for 
@@ -513,7 +536,7 @@ def resolve_streams(wait_time=1.0):
 
     """
     # noinspection PyCallingNonCallable
-    buffer = (c_void_p*1024)()
+    buffer = (c_void_p * 1024)()
     num_found = lib.lsl_resolve_all(byref(buffer), 1024, c_double(wait_time))
     return [StreamInfo(handle=buffer[k]) for k in range(num_found)]
 
@@ -541,7 +564,7 @@ def resolve_byprop(prop, value, minimum=1, timeout=FOREVER):
 
     """
     # noinspection PyCallingNonCallable
-    buffer = (c_void_p*1024)()
+    buffer = (c_void_p * 1024)()
     num_found = lib.lsl_resolve_byprop(byref(buffer), 1024,
                                        c_char_p(str.encode(prop)),
                                        c_char_p(str.encode(value)),
@@ -572,7 +595,7 @@ def resolve_bypred(predicate, minimum=1, timeout=FOREVER):
 
     """
     # noinspection PyCallingNonCallable
-    buffer = (c_void_p*1024)()
+    buffer = (c_void_p * 1024)()
     num_found = lib.lsl_resolve_bypred(byref(buffer), 1024,
                                        c_char_p(str.encode(predicate)),
                                        minimum,
@@ -583,7 +606,8 @@ def resolve_bypred(predicate, minimum=1, timeout=FOREVER):
 # ====================
 # === Stream Inlet ===
 # ====================
-    
+
+# noinspection PyTypeChecker
 class StreamInlet:
     """A stream inlet.
 
@@ -592,7 +616,8 @@ class StreamInlet:
 
     """
     
-    def __init__(self, info, max_buflen=360, max_chunklen=0, recover=True):
+    def __init__(self, info, max_buflen=360, max_chunklen=0, recover=True,
+                 postprocessing=0):
         """Construct a new stream inlet from a resolved stream description.
         
         Keyword arguments:
@@ -622,6 +647,15 @@ class StreamInlet:
                    (recover is False or the stream is not recoverable) 
                    functions may throw a lost_error if the stream's source is 
                    lost (e.g., due to an app or computer crash). (default True)
+        postprocessing -- Set post-processing flags to use. By default, the
+                          inlet performs NO post-processing and returns the
+                          ground-truth time stamps, which can then be manually
+                          synchronized using time_correction(), and then
+                          smoothed/dejittered if desired. This function allows
+                          automating these two and possibly more operations.
+                          Warning: When you enable this, you will no longer
+                          receive or be able to recover the original time
+                          stamps. (default 0)
 
         """
         if type(info) is list:
@@ -632,12 +666,18 @@ class StreamInlet:
         self.obj = c_void_p(self.obj)
         if not self.obj: 
             raise RuntimeError("could not create stream inlet.")
+        if postprocessing:
+            try:
+                lib.lsl_set_postprocessing(self.obj, postprocessing)
+            except:
+                raise RuntimeError("postprocessing flags not supported "
+                                   "in this version of liblsl.")
         self.channel_format = info.channel_format()
         self.channel_count = info.channel_count()
         self.do_pull_sample = fmt2pull_sample[self.channel_format]
         self.do_pull_chunk = fmt2pull_chunk[self.channel_format]
         self.value_type = fmt2type[self.channel_format]
-        self.sample_type = self.value_type*self.channel_count
+        self.sample_type = self.value_type * self.channel_count
         self.sample = self.sample_type()
         self.buffers = {}
 
@@ -787,11 +827,11 @@ class StreamInlet:
         """
         # look up a pre-allocated buffer of appropriate length        
         num_channels = self.channel_count
-        max_values = max_samples*num_channels
+        max_values = max_samples * num_channels
         if max_samples not in self.buffers:
             # noinspection PyCallingNonCallable
-            self.buffers[max_samples] = ((self.value_type*max_values)(),
-                                         (c_double*max_samples)())
+            self.buffers[max_samples] = ((self.value_type * max_values)(),
+                                         (c_double * max_samples)())
         buffer = self.buffers[max_samples]
         # read data into it
         errcode = c_int()
@@ -803,8 +843,9 @@ class StreamInlet:
         handle_error(errcode)
         # return results (note: could offer a more efficient format in the 
         # future, e.g., a numpy array)
-        num_samples = num_elements/num_channels
-        samples = [[buffer[0][s*num_channels+c] for c in range(num_channels)]   
+        num_samples = num_elements / num_channels
+        samples = [[buffer[0][s * num_channels + c]
+                    for c in range(num_channels)]
                    for s in range(int(num_samples))]
         if self.channel_format == cf_string:
             samples = [[v.decode('utf-8') for v in s] for s in samples]
@@ -852,7 +893,7 @@ class XMLElement:
     
     def __init__(self, handle):
         """Construct new XML element from existing handle."""
-        self.e = handle
+        self.e = c_void_p(handle)
     
     # === Tree Navigation ===
     
@@ -866,7 +907,7 @@ class XMLElement:
 
     def child(self, name):
         """Get a child with a specified name."""
-        return XMLElement(lib.lsl_child(self.e, str.encode(name)))
+        return XMLElement(lib.lsl_child(self.e, c_char_p(str.encode(name))))
         
     def next_sibling(self, name=None):
         """Get the next sibling in the children list of the parent node.
@@ -877,7 +918,8 @@ class XMLElement:
         if name is None:
             return XMLElement(lib.lsl_next_sibling(self.e))
         else:
-            return XMLElement(lib.lsl_next_sibling_n(self.e, str.encode(name)))
+            return XMLElement(lib.lsl_next_sibling_n(self.e,
+                                                     c_char_p(str.encode(name))))
     
     def previous_sibling(self, name=None):
         """Get the previous sibling in the children list of the parent node.
@@ -890,8 +932,8 @@ class XMLElement:
             return XMLElement(lib.lsl_previous_sibling(self.e))
         else:
             return XMLElement(lib.lsl_previous_sibling_n(self.e,
-                                                         str.encode(name)))
-        
+                                                         c_char_p(str.encode(name))))
+
     def parent(self):
         """Get the parent node."""
         return XMLElement(lib.lsl_parent(self.e))
@@ -928,7 +970,7 @@ class XMLElement:
         if name is None:
             res = lib.lsl_child_value(self.e)
         else:
-            res = lib.lsl_child_value_n(self.e, str.encode(name))
+            res = lib.lsl_child_value_n(self.e, c_char_p(str.encode(name)))
         return res.decode('utf-8')
 
     # === Modification ===
@@ -937,38 +979,40 @@ class XMLElement:
         """Append a child node with a given name, which has a (nameless) 
         plain-text child with the given text value."""
         return XMLElement(lib.lsl_append_child_value(self.e,
-                                                     str.encode(name),
-                                                     str.encode(value)))
+                                                     c_char_p(str.encode(name)),
+                                                     c_char_p(str.encode(value))))
     
     def prepend_child_value(self, name, value):
         """Prepend a child node with a given name, which has a (nameless) 
         plain-text child with the given text value."""
         return XMLElement(lib.lsl_prepend_child_value(self.e,
-                                                      str.encode(name),
-                                                      str.encode(value)))
+                                                      c_char_p(str.encode(name)),
+                                                      c_char_p(str.encode(value))))
 
     def set_child_value(self, name, value):
         """Set the text value of the (nameless) plain-text child of a named 
         child node."""
         return XMLElement(lib.lsl_set_child_value(self.e,
-                                                  str.encode(name),
-                                                  str.encode(value)))
+                                                  c_char_p(str.encode(name)),
+                                                  c_char_p(str.encode(value))))
         
     def set_name(self, name):
         """Set the element's name. Returns False if the node is empty."""
-        return bool(lib.lsl_set_name(self.e, str.encode(name)))
+        return bool(lib.lsl_set_name(self.e, c_char_p(str.encode(name))))
      
     def set_value(self, value):
         """Set the element's value. Returns False if the node is empty."""
-        return bool(lib.lsl_set_value(self.e, str.encode(value)))
-        
+        return bool(lib.lsl_set_value(self.e, c_char_p(str.encode(value))))
+
     def append_child(self, name):
         """Append a child element with the specified name."""
-        return XMLElement(lib.lsl_append_child(self.e, str.encode(name)))
+        return XMLElement(lib.lsl_append_child(self.e,
+                                               c_char_p(str.encode(name))))
      
     def prepend_child(self, name):
         """Prepend a child element with the specified name."""
-        return XMLElement(lib.lsl_prepend_child(self.e, str.encode(name)))
+        return XMLElement(lib.lsl_prepend_child(self.e,
+                                                c_char_p(str.encode(name))))
         
     def append_copy(self, elem):
         """Append a copy of the specified element as a child."""
@@ -1013,11 +1057,11 @@ class ContinuousResolver:
                 raise ValueError("you can only either pass the prop/value "
                                  "argument or the pred argument, but not "
                                  "both.")
-            self.obj = lib.lsl_create_continuous_resolver_bypred(str.encode(pred),
+            self.obj = lib.lsl_create_continuous_resolver_bypred(c_char_p(str.encode(pred)),
                                                                  c_double(forget_after))
         elif prop is not None and value is not None:
-            self.obj = lib.lsl_create_continuous_resolver_byprop(str.encode(prop),
-                                                                 str.encode(value),
+            self.obj = lib.lsl_create_continuous_resolver_byprop(c_char_p(str.encode(prop)),
+                                                                 c_char_p(str.encode(value)),
                                                                  c_double(forget_after))
         elif prop is not None or value is not None:
             raise ValueError("if prop is specified, then value must be "
@@ -1044,7 +1088,7 @@ class ContinuousResolver:
 
         """
         # noinspection PyCallingNonCallable
-        buffer = (c_void_p*1024)()
+        buffer = (c_void_p * 1024)()
         num_found = lib.lsl_resolver_results(self.obj, byref(buffer), 1024)
         return [StreamInfo(handle=buffer[k]) for k in range(num_found)]
 
